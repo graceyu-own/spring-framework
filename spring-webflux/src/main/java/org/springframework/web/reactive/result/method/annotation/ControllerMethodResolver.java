@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2023 the original author or authors.
+ * Copyright 2002-2024 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@ import java.util.function.Predicate;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import reactor.core.scheduler.Scheduler;
 
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.context.ApplicationContext;
@@ -55,7 +56,6 @@ import org.springframework.web.reactive.result.method.HandlerMethodArgumentResol
 import org.springframework.web.reactive.result.method.InvocableHandlerMethod;
 import org.springframework.web.reactive.result.method.SyncHandlerMethodArgumentResolver;
 import org.springframework.web.reactive.result.method.SyncInvocableHandlerMethod;
-import org.springframework.web.service.invoker.RequestParamArgumentResolver;
 
 /**
  * Package-private class to assist {@link RequestMappingHandlerAdapter} with
@@ -88,7 +88,7 @@ class ControllerMethodResolver {
 			(!AnnotatedElementUtils.hasAnnotation(method, RequestMapping.class) &&
 					AnnotatedElementUtils.hasAnnotation(method, ModelAttribute.class));
 
-	private final static boolean BEAN_VALIDATION_PRESENT =
+	private static final boolean BEAN_VALIDATION_PRESENT =
 			ClassUtils.isPresent("jakarta.validation.Validator", HandlerMethod.class.getClassLoader());
 
 	private static final Log logger = LogFactory.getLog(ControllerMethodResolver.class);
@@ -103,6 +103,12 @@ class ControllerMethodResolver {
 	private final List<HandlerMethodArgumentResolver> exceptionHandlerResolvers;
 
 	private final ReactiveAdapterRegistry reactiveAdapterRegistry;
+
+	@Nullable
+	private final Scheduler invocationScheduler;
+
+	@Nullable
+	private final Predicate<? super HandlerMethod> blockingMethodPredicate;
 
 	@Nullable
 	private final MethodValidator methodValidator;
@@ -126,7 +132,9 @@ class ControllerMethodResolver {
 	ControllerMethodResolver(
 			ArgumentResolverConfigurer customResolvers, ReactiveAdapterRegistry adapterRegistry,
 			ConfigurableApplicationContext context, List<HttpMessageReader<?>> readers,
-			@Nullable WebBindingInitializer webBindingInitializer) {
+			@Nullable WebBindingInitializer webBindingInitializer,
+			@Nullable Scheduler invocationScheduler,
+			@Nullable Predicate<? super HandlerMethod> blockingMethodPredicate) {
 
 		Assert.notNull(customResolvers, "ArgumentResolverConfigurer is required");
 		Assert.notNull(adapterRegistry, "ReactiveAdapterRegistry is required");
@@ -138,11 +146,13 @@ class ControllerMethodResolver {
 		this.requestMappingResolvers = requestMappingResolvers(customResolvers, adapterRegistry, context, readers);
 		this.exceptionHandlerResolvers = exceptionHandlerResolvers(customResolvers, adapterRegistry, context);
 		this.reactiveAdapterRegistry = adapterRegistry;
+		this.invocationScheduler = invocationScheduler;
+		this.blockingMethodPredicate = blockingMethodPredicate;
 
 		if (BEAN_VALIDATION_PRESENT) {
 			this.methodValidator = HandlerMethodValidator.from(webBindingInitializer, null,
 					methodParamPredicate(this.requestMappingResolvers, ModelAttributeMethodArgumentResolver.class),
-					methodParamPredicate(this.requestMappingResolvers, RequestParamArgumentResolver.class));
+					methodParamPredicate(this.requestMappingResolvers, RequestParamMethodArgumentResolver.class));
 		}
 		else {
 			this.methodValidator = null;
@@ -288,6 +298,21 @@ class ControllerMethodResolver {
 		};
 	}
 
+	/**
+	 * Return a {@link Scheduler} for the given method if it is considered
+	 * blocking by the underlying blocking method predicate, or null if no
+	 * particular scheduler should be used for this method invocation.
+	 */
+	@Nullable
+	public Scheduler getSchedulerFor(HandlerMethod handlerMethod) {
+		if (this.invocationScheduler != null) {
+			Assert.state(this.blockingMethodPredicate != null, "Expected HandlerMethod Predicate");
+			if (this.blockingMethodPredicate.test(handlerMethod)) {
+				return this.invocationScheduler;
+			}
+		}
+		return null;
+	}
 
 	/**
 	 * Return an {@link InvocableHandlerMethod} for the given
@@ -298,6 +323,7 @@ class ControllerMethodResolver {
 		invocable.setArgumentResolvers(this.requestMappingResolvers);
 		invocable.setReactiveAdapterRegistry(this.reactiveAdapterRegistry);
 		invocable.setMethodValidator(this.methodValidator);
+		invocable.setInvocationScheduler(getSchedulerFor(handlerMethod));
 		return invocable;
 	}
 
@@ -376,6 +402,7 @@ class ControllerMethodResolver {
 	 * if {@code null}, check only {@code @ControllerAdvice} classes.
 	 */
 	@Nullable
+	@SuppressWarnings("NullAway")
 	public InvocableHandlerMethod getExceptionHandlerMethod(Throwable ex, @Nullable HandlerMethod handlerMethod) {
 
 		Class<?> handlerType = (handlerMethod != null ? handlerMethod.getBeanType() : null);

@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2023 the original author or authors.
+ * Copyright 2002-2024 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,15 +24,19 @@ import java.util.Map;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 
+import io.micrometer.observation.ObservationRegistry;
+
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.client.ClientHttpRequestFactory;
 import org.springframework.http.client.ClientHttpRequestInitializer;
 import org.springframework.http.client.ClientHttpRequestInterceptor;
 import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
+import org.springframework.http.client.InterceptingClientHttpRequestFactory;
 import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.http.client.JettyClientHttpRequestFactory;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import org.springframework.http.client.observation.ClientRequestObservationConvention;
 import org.springframework.http.converter.ByteArrayHttpMessageConverter;
 import org.springframework.http.converter.HttpMessageConverter;
 import org.springframework.http.converter.ResourceHttpMessageConverter;
@@ -44,17 +48,20 @@ import org.springframework.http.converter.json.KotlinSerializationJsonHttpMessag
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
 import org.springframework.http.converter.smile.MappingJackson2SmileHttpMessageConverter;
 import org.springframework.http.converter.support.AllEncompassingFormHttpMessageConverter;
+import org.springframework.http.converter.yaml.MappingJackson2YamlHttpMessageConverter;
 import org.springframework.lang.Nullable;
 import org.springframework.util.Assert;
 import org.springframework.util.ClassUtils;
 import org.springframework.util.CollectionUtils;
 import org.springframework.web.util.DefaultUriBuilderFactory;
 import org.springframework.web.util.UriBuilderFactory;
+import org.springframework.web.util.UriTemplateHandler;
 
 /**
  * Default implementation of {@link RestClient.Builder}.
  *
  * @author Arjen Poutsma
+ * @author Hyoungjune Kim
  * @since 6.1
  */
 final class DefaultRestClientBuilder implements RestClient.Builder {
@@ -81,6 +88,8 @@ final class DefaultRestClientBuilder implements RestClient.Builder {
 
 	private static final boolean jackson2CborPresent;
 
+	private static final boolean jackson2YamlPresent;
+
 
 	static {
 		ClassLoader loader = DefaultRestClientBuilder.class.getClassLoader();
@@ -96,6 +105,7 @@ final class DefaultRestClientBuilder implements RestClient.Builder {
 		kotlinSerializationJsonPresent = ClassUtils.isPresent("kotlinx.serialization.json.Json", loader);
 		jackson2SmilePresent = ClassUtils.isPresent("com.fasterxml.jackson.dataformat.smile.SmileFactory", loader);
 		jackson2CborPresent = ClassUtils.isPresent("com.fasterxml.jackson.dataformat.cbor.CBORFactory", loader);
+		jackson2YamlPresent = ClassUtils.isPresent("com.fasterxml.jackson.dataformat.yaml.YAMLFactory", loader);
 	}
 
 	@Nullable
@@ -128,6 +138,11 @@ final class DefaultRestClientBuilder implements RestClient.Builder {
 	@Nullable
 	private List<ClientHttpRequestInitializer> initializers;
 
+	private ObservationRegistry observationRegistry = ObservationRegistry.NOOP;
+
+	@Nullable
+	private ClientRequestObservationConvention observationConvention;
+
 
 	public DefaultRestClientBuilder() {
 	}
@@ -156,18 +171,18 @@ final class DefaultRestClientBuilder implements RestClient.Builder {
 
 		this.interceptors = (other.interceptors != null) ? new ArrayList<>(other.interceptors) : null;
 		this.initializers = (other.initializers != null) ? new ArrayList<>(other.initializers) : null;
+		this.observationRegistry = other.observationRegistry;
+		this.observationConvention = other.observationConvention;
 	}
 
 	public DefaultRestClientBuilder(RestTemplate restTemplate) {
 		Assert.notNull(restTemplate, "RestTemplate must not be null");
 
-		if (restTemplate.getUriTemplateHandler() instanceof UriBuilderFactory builderFactory) {
-			this.uriBuilderFactory = builderFactory;
-		}
+		this.uriBuilderFactory = getUriBuilderFactory(restTemplate);
 		this.statusHandlers = new ArrayList<>();
 		this.statusHandlers.add(StatusHandler.fromErrorHandler(restTemplate.getErrorHandler()));
 
-		this.requestFactory = restTemplate.getRequestFactory();
+		this.requestFactory = getRequestFactory(restTemplate);
 		this.messageConverters = new ArrayList<>(restTemplate.getMessageConverters());
 
 		if (!CollectionUtils.isEmpty(restTemplate.getInterceptors())) {
@@ -175,6 +190,51 @@ final class DefaultRestClientBuilder implements RestClient.Builder {
 		}
 		if (!CollectionUtils.isEmpty(restTemplate.getClientHttpRequestInitializers())) {
 			this.initializers = new ArrayList<>(restTemplate.getClientHttpRequestInitializers());
+		}
+		this.observationRegistry = restTemplate.getObservationRegistry();
+		this.observationConvention = restTemplate.getObservationConvention();
+	}
+
+	@Nullable
+	private static UriBuilderFactory getUriBuilderFactory(RestTemplate restTemplate) {
+		UriTemplateHandler uriTemplateHandler = restTemplate.getUriTemplateHandler();
+		if (uriTemplateHandler instanceof DefaultUriBuilderFactory builderFactory) {
+			// only reuse the DefaultUriBuilderFactory if it has been customized
+			if (hasRestTemplateDefaults(builderFactory)) {
+				return null;
+			}
+			else {
+				return builderFactory;
+			}
+		}
+		else if (uriTemplateHandler instanceof UriBuilderFactory builderFactory) {
+			return builderFactory;
+		}
+		else {
+			return null;
+		}
+	}
+
+
+	/**
+	 * Indicate whether this {@code DefaultUriBuilderFactory} uses the default
+	 * {@link org.springframework.web.client.RestTemplate RestTemplate} settings.
+	 */
+	private static boolean hasRestTemplateDefaults(DefaultUriBuilderFactory factory) {
+		// see RestTemplate::initUriTemplateHandler
+		return (!factory.hasBaseUri() &&
+				factory.getEncodingMode() == DefaultUriBuilderFactory.EncodingMode.URI_COMPONENT &&
+				CollectionUtils.isEmpty(factory.getDefaultUriVariables()) &&
+				factory.shouldParsePath());
+	}
+
+	private static ClientHttpRequestFactory getRequestFactory(RestTemplate restTemplate) {
+		ClientHttpRequestFactory requestFactory = restTemplate.getRequestFactory();
+		if (requestFactory instanceof InterceptingClientHttpRequestFactory interceptingClientHttpRequestFactory) {
+			return interceptingClientHttpRequestFactory.getDelegate();
+		}
+		else {
+			return requestFactory;
 		}
 	}
 
@@ -295,6 +355,19 @@ final class DefaultRestClientBuilder implements RestClient.Builder {
 	}
 
 	@Override
+	public RestClient.Builder observationRegistry(ObservationRegistry observationRegistry) {
+		Assert.notNull(observationRegistry, "observationRegistry must not be null");
+		this.observationRegistry = observationRegistry;
+		return this;
+	}
+
+	@Override
+	public RestClient.Builder observationConvention(ClientRequestObservationConvention observationConvention) {
+		this.observationConvention = observationConvention;
+		return this;
+	}
+
+	@Override
 	public RestClient.Builder apply(Consumer<RestClient.Builder> builderConsumer) {
 		builderConsumer.accept(this);
 		return this;
@@ -326,6 +399,9 @@ final class DefaultRestClientBuilder implements RestClient.Builder {
 			if (jackson2CborPresent) {
 				this.messageConverters.add(new MappingJackson2CborHttpMessageConverter());
 			}
+			if (jackson2YamlPresent) {
+				this.messageConverters.add(new MappingJackson2YamlHttpMessageConverter());
+			}
 		}
 		return this.messageConverters;
 	}
@@ -346,8 +422,11 @@ final class DefaultRestClientBuilder implements RestClient.Builder {
 		return new DefaultRestClient(requestFactory,
 				this.interceptors, this.initializers, uriBuilderFactory,
 				defaultHeaders,
+				this.defaultRequest,
 				this.statusHandlers,
 				messageConverters,
+				this.observationRegistry,
+				this.observationConvention,
 				new DefaultRestClientBuilder(this)
 				);
 	}

@@ -243,7 +243,7 @@ public interface ServerRequest {
 	default String pathVariable(String name) {
 		Map<String, String> pathVariables = pathVariables();
 		if (pathVariables.containsKey(name)) {
-			return pathVariables().get(name);
+			return pathVariables.get(name);
 		}
 		else {
 			throw new IllegalArgumentException("No path variable with name \"" + name + "\" available");
@@ -501,7 +501,7 @@ public interface ServerRequest {
 
 		/**
 		 * Add the given header value(s) under the given name.
-		 * @param headerName  the header name
+		 * @param headerName the header name
 		 * @param headerValues the header value(s)
 		 * @return this builder
 		 * @see HttpHeaders#add(String, String)

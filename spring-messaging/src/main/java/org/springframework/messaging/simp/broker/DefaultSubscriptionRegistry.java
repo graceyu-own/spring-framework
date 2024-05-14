@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2023 the original author or authors.
+ * Copyright 2002-2024 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -305,6 +305,9 @@ public class DefaultSubscriptionRegistry extends AbstractSubscriptionRegistry {
 					return Collections.singletonList(subscriptionId);
 				}
 				else {
+					if (subscriptionIds.contains(subscriptionId)) {
+						return subscriptionIds;
+					}
 					List<String> result = new ArrayList<>(subscriptionIds.size() + 1);
 					result.addAll(subscriptionIds);
 					result.add(subscriptionId);
@@ -481,8 +484,8 @@ public class DefaultSubscriptionRegistry extends AbstractSubscriptionRegistry {
 		}
 
 		@Override
-		public boolean equals(@Nullable Object obj) {
-			return (this == obj || (obj instanceof Subscription that && this.id.equals(that.id)));
+		public boolean equals(@Nullable Object other) {
+			return (this == other || (other instanceof Subscription that && this.id.equals(that.id)));
 		}
 
 		@Override

@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2023 the original author or authors.
+ * Copyright 2002-2024 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,7 +32,10 @@ import org.springframework.util.Assert;
 /**
  * Bridges between {@link OutputStream} and
  * {@link Flow.Publisher Flow.Publisher&lt;T&gt;}.
-
+ *
+ * <p>Note that this class has a near duplicate in
+ * {@link org.springframework.core.io.buffer.OutputStreamPublisher}.
+ *
  * @author Oleh Dokuka
  * @author Arjen Poutsma
  * @since 6.1
@@ -147,6 +150,8 @@ final class OutputStreamPublisher<T> implements Flow.Publisher<T> {
 
 	@Override
 	public void subscribe(Flow.Subscriber<? super T> subscriber) {
+		// We don't use Assert.notNull(), because a NullPointerException is required
+		// for Reactive Streams compliance.
 		Objects.requireNonNull(subscriber, "Subscriber must not be null");
 
 		OutputStreamSubscription<T> subscription = new OutputStreamSubscription<>(subscriber, this.outputStreamHandler,

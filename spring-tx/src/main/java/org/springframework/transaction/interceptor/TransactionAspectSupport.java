@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2023 the original author or authors.
+ * Copyright 2002-2024 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,8 +26,6 @@ import io.vavr.control.Try;
 import kotlin.coroutines.Continuation;
 import kotlin.coroutines.CoroutineContext;
 import kotlinx.coroutines.Job;
-import kotlinx.coroutines.reactive.ReactiveFlowKt;
-import kotlinx.coroutines.reactor.MonoKt;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.reactivestreams.Publisher;
@@ -37,6 +35,7 @@ import reactor.core.publisher.Mono;
 import org.springframework.beans.factory.BeanFactory;
 import org.springframework.beans.factory.BeanFactoryAware;
 import org.springframework.beans.factory.InitializingBean;
+import org.springframework.beans.factory.NoSuchBeanDefinitionException;
 import org.springframework.beans.factory.annotation.BeanFactoryAnnotationUtils;
 import org.springframework.core.CoroutinesUtils;
 import org.springframework.core.KotlinDetector;
@@ -155,8 +154,15 @@ public abstract class TransactionAspectSupport implements BeanFactoryAware, Init
 	 * Return the transaction status of the current method invocation.
 	 * Mainly intended for code that wants to set the current transaction
 	 * rollback-only but not throw an application exception.
+	 * <p>This exposes the locally declared transaction boundary with its declared name
+	 * and characteristics, as managed by the aspect. Ar runtime, the local boundary may
+	 * participate in an outer transaction: If you need transaction metadata from such
+	 * an outer transaction (the actual resource transaction) instead, consider using
+	 * {@link org.springframework.transaction.support.TransactionSynchronizationManager}.
 	 * @throws NoTransactionException if the transaction info cannot be found,
 	 * because the method was invoked outside an AOP invocation context
+	 * @see org.springframework.transaction.support.TransactionSynchronizationManager#getCurrentTransactionName()
+	 * @see org.springframework.transaction.support.TransactionSynchronizationManager#isCurrentTransactionReadOnly()
 	 */
 	public static TransactionStatus currentTransactionStatus() throws NoTransactionException {
 		TransactionInfo info = currentTransactionInfo();
@@ -344,7 +350,7 @@ public abstract class TransactionAspectSupport implements BeanFactoryAware, Init
 		// If the transaction attribute is null, the method is non-transactional.
 		TransactionAttributeSource tas = getTransactionAttributeSource();
 		final TransactionAttribute txAttr = (tas != null ? tas.getTransactionAttribute(method, targetClass) : null);
-		final TransactionManager tm = determineTransactionManager(txAttr);
+		final TransactionManager tm = determineTransactionManager(txAttr, targetClass);
 
 		if (this.reactiveAdapterRegistry != null && tm instanceof ReactiveTransactionManager rtm) {
 			boolean isSuspendingFunction = KotlinDetector.isSuspendingFunction(method);
@@ -360,8 +366,8 @@ public abstract class TransactionAspectSupport implements BeanFactoryAware, Init
 						(isSuspendingFunction ? (hasSuspendingFlowReturnType ? Flux.class : Mono.class) : method.getReturnType());
 				ReactiveAdapter adapter = this.reactiveAdapterRegistry.getAdapter(reactiveType);
 				if (adapter == null) {
-					throw new IllegalStateException("Cannot apply reactive transaction to non-reactive return type: " +
-							method.getReturnType());
+					throw new IllegalStateException("Cannot apply reactive transaction to non-reactive return type [" +
+							method.getReturnType() + "] with specified transaction manager: " + tm);
 				}
 				return new ReactiveTransactionSupport(adapter);
 			});
@@ -370,12 +376,7 @@ public abstract class TransactionAspectSupport implements BeanFactoryAware, Init
 			if (corInv != null) {
 				callback = () -> KotlinDelegate.invokeSuspendingFunction(method, corInv);
 			}
-			Object result = txSupport.invokeWithinTransaction(method, targetClass, callback, txAttr, rtm);
-			if (corInv != null) {
-				return (hasSuspendingFlowReturnType ? KotlinDelegate.asFlow((Publisher<?>) result) :
-						KotlinDelegate.awaitSingleOrNull((Mono<?>) result, corInv.getContinuation()));
-			}
-			return result;
+			return txSupport.invokeWithinTransaction(method, targetClass, callback, txAttr, rtm);
 		}
 
 		PlatformTransactionManager ptm = asPlatformTransactionManager(tm);
@@ -408,7 +409,9 @@ public abstract class TransactionAspectSupport implements BeanFactoryAware, Init
 							future.get();
 						}
 						catch (ExecutionException ex) {
-							if (txAttr.rollbackOn(ex.getCause())) {
+							Throwable cause = ex.getCause();
+							Assert.state(cause != null, "Cause must not be null");
+							if (txAttr.rollbackOn(cause)) {
 								status.setRollbackOnly();
 							}
 						}
@@ -499,9 +502,19 @@ public abstract class TransactionAspectSupport implements BeanFactoryAware, Init
 
 	/**
 	 * Determine the specific transaction manager to use for the given transaction.
+	 * @param txAttr the current transaction attribute
+	 * @param targetClass the target class that the attribute has been declared on
+	 * @since 6.2
 	 */
 	@Nullable
-	protected TransactionManager determineTransactionManager(@Nullable TransactionAttribute txAttr) {
+	protected TransactionManager determineTransactionManager(
+			@Nullable TransactionAttribute txAttr, @Nullable Class<?> targetClass) {
+
+		TransactionManager tm = determineTransactionManager(txAttr);
+		if (tm != null) {
+			return tm;
+		}
+
 		// Do not attempt to lookup tx manager if no tx attributes are set
 		if (txAttr == null || this.beanFactory == null) {
 			return getTransactionManager();
@@ -511,7 +524,20 @@ public abstract class TransactionAspectSupport implements BeanFactoryAware, Init
 		if (StringUtils.hasText(qualifier)) {
 			return determineQualifiedTransactionManager(this.beanFactory, qualifier);
 		}
-		else if (StringUtils.hasText(this.transactionManagerBeanName)) {
+		else if (targetClass != null) {
+			// Consider type-level qualifier annotations for transaction manager selection
+			String typeQualifier = BeanFactoryAnnotationUtils.getQualifierValue(targetClass);
+			if (StringUtils.hasText(typeQualifier)) {
+				try {
+					return determineQualifiedTransactionManager(this.beanFactory, typeQualifier);
+				}
+				catch (NoSuchBeanDefinitionException ex) {
+					// Consider type qualifier as optional, proceed with regular resolution below.
+				}
+			}
+		}
+
+		if (StringUtils.hasText(this.transactionManagerBeanName)) {
 			return determineQualifiedTransactionManager(this.beanFactory, this.transactionManagerBeanName);
 		}
 		else {
@@ -528,6 +554,16 @@ public abstract class TransactionAspectSupport implements BeanFactoryAware, Init
 		}
 	}
 
+	/**
+	 * Determine the specific transaction manager to use for the given transaction.
+	 * @deprecated as of 6.2, in favor of {@link #determineTransactionManager(TransactionAttribute, Class)}
+	 */
+	@Deprecated
+	@Nullable
+	protected TransactionManager determineTransactionManager(@Nullable TransactionAttribute txAttr) {
+		return null;
+	}
+
 	private TransactionManager determineQualifiedTransactionManager(BeanFactory beanFactory, String qualifier) {
 		TransactionManager txManager = this.transactionManagerCache.get(qualifier);
 		if (txManager == null) {
@@ -537,7 +573,6 @@ public abstract class TransactionAspectSupport implements BeanFactoryAware, Init
 		}
 		return txManager;
 	}
-
 
 	@Nullable
 	private PlatformTransactionManager asPlatformTransactionManager(@Nullable Object transactionManager) {
@@ -868,7 +903,9 @@ public abstract class TransactionAspectSupport implements BeanFactoryAware, Init
 
 		@Override
 		public String toString() {
-			return getCause().toString();
+			Throwable cause = getCause();
+			Assert.state(cause != null, "Cause must not be null");
+			return cause.toString();
 		}
 	}
 
@@ -895,16 +932,6 @@ public abstract class TransactionAspectSupport implements BeanFactoryAware, Init
 	 * Inner class to avoid a hard dependency on Kotlin at runtime.
 	 */
 	private static class KotlinDelegate {
-
-		private static Object asFlow(Publisher<?> publisher) {
-			return ReactiveFlowKt.asFlow(publisher);
-		}
-
-		@SuppressWarnings("unchecked")
-		@Nullable
-		private static Object awaitSingleOrNull(Mono<?> publisher, Object continuation) {
-			return MonoKt.awaitSingleOrNull(publisher, (Continuation<Object>) continuation);
-		}
 
 		public static Publisher<?> invokeSuspendingFunction(Method method, CoroutinesInvocationCallback callback) {
 			CoroutineContext coroutineContext = ((Continuation<?>) callback.getContinuation()).getContext().minusKey(Job.Key);

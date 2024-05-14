@@ -231,6 +231,8 @@ public class MethodParameter {
 	 * Return the wrapped annotated element.
 	 * <p>Note: This method exposes the annotations declared on the method/constructor
 	 * itself (i.e. at the method/constructor level, not at the parameter level).
+	 * <p>To get the {@link AnnotatedElement} at the parameter level, use
+	 * {@link #getParameter()}.
 	 * @return the Method or Constructor as AnnotatedElement
 	 */
 	public AnnotatedElement getAnnotatedElement() {
@@ -718,7 +720,7 @@ public class MethodParameter {
 			else if (this.executable instanceof Constructor<?> constructor) {
 				parameterNames = discoverer.getParameterNames(constructor);
 			}
-			if (parameterNames != null) {
+			if (parameterNames != null && this.parameterIndex < parameterNames.length) {
 				this.parameterName = parameterNames[this.parameterIndex];
 			}
 			this.parameterNameDiscoverer = null;

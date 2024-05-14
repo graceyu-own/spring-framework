@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2023 the original author or authors.
+ * Copyright 2002-2024 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@ package org.springframework.test.web.servlet.request;
 
 import java.io.IOException;
 import java.net.URI;
-import java.net.URISyntaxException;
 import java.security.Principal;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -30,6 +29,7 @@ import java.util.Map;
 
 import jakarta.servlet.ServletContext;
 import jakarta.servlet.http.Cookie;
+import org.assertj.core.api.ThrowingConsumer;
 import org.junit.jupiter.api.Test;
 
 import org.springframework.http.HttpHeaders;
@@ -48,11 +48,13 @@ import static java.nio.charset.StandardCharsets.ISO_8859_1;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
+import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
+import static org.assertj.core.api.Assertions.entry;
 import static org.springframework.http.HttpMethod.GET;
 import static org.springframework.http.HttpMethod.POST;
 
 /**
- * Unit tests for building a {@link MockHttpServletRequest} with
+ * Tests for building a {@link MockHttpServletRequest} with
  * {@link MockHttpServletRequestBuilder}.
  *
  * @author Rossen Stoyanchev
@@ -96,7 +98,7 @@ class MockHttpServletRequestBuilderTests {
 	}
 
 	@Test  // SPR-13435
-	void requestUriWithDoubleSlashes() throws URISyntaxException {
+	void requestUriWithDoubleSlashes() {
 		this.builder = new MockHttpServletRequestBuilder(GET, URI.create("/test//currentlyValid/0"));
 		MockHttpServletRequest request = this.builder.buildRequest(this.servletContext);
 
@@ -290,6 +292,70 @@ class MockHttpServletRequestBuilderTests {
 	}
 
 	@Test
+	void formField() {
+		this.builder = new MockHttpServletRequestBuilder(POST, "/");
+		this.builder.formField("foo", "bar");
+		this.builder.formField("foo", "baz");
+
+		MockHttpServletRequest request = this.builder.buildRequest(this.servletContext);
+
+		assertThat(request.getParameterMap().get("foo")).containsExactly("bar", "baz");
+		assertThat(request).satisfies(hasFormData("foo=bar&foo=baz"));
+	}
+
+	@Test
+	void formFieldMap() {
+		this.builder = new MockHttpServletRequestBuilder(POST, "/");
+		MultiValueMap<String, String> formFields = new LinkedMultiValueMap<>();
+		List<String> values = new ArrayList<>();
+		values.add("bar");
+		values.add("baz");
+		formFields.put("foo", values);
+		this.builder.formFields(formFields);
+
+		MockHttpServletRequest request = this.builder.buildRequest(this.servletContext);
+
+		assertThat(request.getParameterMap().get("foo")).containsExactly("bar", "baz");
+		assertThat(request).satisfies(hasFormData("foo=bar&foo=baz"));
+	}
+
+	@Test
+	void formFieldsAreEncoded() {
+		MockHttpServletRequest request = new MockHttpServletRequestBuilder(POST, "/")
+				.formField("name 1", "value 1").formField("name 2", "value A", "value B")
+				.buildRequest(new MockServletContext());
+		assertThat(request.getParameterMap()).containsOnly(
+				entry("name 1", new String[] { "value 1" }),
+				entry("name 2", new String[] { "value A", "value B" }));
+		assertThat(request).satisfies(hasFormData("name+1=value+1&name+2=value+A&name+2=value+B"));
+	}
+
+	@Test
+	void formFieldWithContent() {
+		this.builder = new MockHttpServletRequestBuilder(POST, "/");
+		this.builder.content("Should not have content");
+		this.builder.formField("foo", "bar");
+		assertThatIllegalStateException().isThrownBy(() -> this.builder.buildRequest(this.servletContext))
+				.withMessage("Could not write form data with an existing body");
+	}
+
+	@Test
+	void formFieldWithIncompatibleMediaType() {
+		this.builder = new MockHttpServletRequestBuilder(POST, "/");
+		this.builder.contentType(MediaType.TEXT_PLAIN);
+		this.builder.formField("foo", "bar");
+		assertThatIllegalStateException().isThrownBy(() -> this.builder.buildRequest(this.servletContext))
+				.withMessage("Invalid content type: 'text/plain' is not compatible with 'application/x-www-form-urlencoded'");
+	}
+
+	private ThrowingConsumer<MockHttpServletRequest> hasFormData(String body) {
+		return request -> {
+			assertThat(request.getContentAsString()).isEqualTo(body);
+			assertThat(request.getContentType()).isEqualTo("application/x-www-form-urlencoded;charset=UTF-8");
+		};
+	}
+
+	@Test
 	void requestParameterFromQueryWithEncoding() {
 		this.builder = new MockHttpServletRequestBuilder(GET, "/?foo={value}", "bar=baz");
 
@@ -311,7 +377,7 @@ class MockHttpServletRequestBuilderTests {
 	}
 
 	@Test  // SPR-13801
-	void requestParameterFromMultiValueMap() throws Exception {
+	void requestParameterFromMultiValueMap() {
 		MultiValueMap<String, String> params = new LinkedMultiValueMap<>();
 		params.add("foo", "bar");
 		params.add("foo", "baz");
@@ -324,7 +390,7 @@ class MockHttpServletRequestBuilderTests {
 	}
 
 	@Test
-	void requestParameterFromRequestBodyFormData() throws Exception {
+	void requestParameterFromRequestBodyFormData() {
 		String contentType = "application/x-www-form-urlencoded;charset=UTF-8";
 		String body = "name+1=value+1&name+2=value+A&name+2=value+B&name+3";
 
@@ -366,8 +432,7 @@ class MockHttpServletRequestBuilderTests {
 		List<String> contentTypes = Collections.list(request.getHeaders("Content-Type"));
 
 		assertThat(contentType).isEqualTo("text/html");
-		assertThat(contentTypes).hasSize(1);
-		assertThat(contentTypes.get(0)).isEqualTo("text/html");
+		assertThat(contentTypes).containsExactly("text/html");
 	}
 
 	@Test
@@ -379,8 +444,7 @@ class MockHttpServletRequestBuilderTests {
 		List<String> contentTypes = Collections.list(request.getHeaders("Content-Type"));
 
 		assertThat(contentType).isEqualTo("text/html");
-		assertThat(contentTypes).hasSize(1);
-		assertThat(contentTypes.get(0)).isEqualTo("text/html");
+		assertThat(contentTypes).containsExactly("text/html");
 	}
 
 	@Test // gh-2079
@@ -433,9 +497,7 @@ class MockHttpServletRequestBuilderTests {
 		MockHttpServletRequest request = this.builder.buildRequest(this.servletContext);
 		List<String> headers = Collections.list(request.getHeaders("foo"));
 
-		assertThat(headers).hasSize(2);
-		assertThat(headers.get(0)).isEqualTo("bar");
-		assertThat(headers.get(1)).isEqualTo("baz");
+		assertThat(headers).containsExactly("bar", "baz");
 	}
 
 	@Test
@@ -448,9 +510,7 @@ class MockHttpServletRequestBuilderTests {
 		MockHttpServletRequest request = this.builder.buildRequest(this.servletContext);
 		List<String> headers = Collections.list(request.getHeaders("foo"));
 
-		assertThat(headers).hasSize(2);
-		assertThat(headers.get(0)).isEqualTo("bar");
-		assertThat(headers.get(1)).isEqualTo("baz");
+		assertThat(headers).containsExactly("bar", "baz");
 		assertThat(request.getHeader("Content-Type")).isEqualTo(MediaType.APPLICATION_JSON.toString());
 	}
 
@@ -603,7 +663,7 @@ class MockHttpServletRequestBuilderTests {
 	}
 
 
-	private final class User implements Principal {
+	private static final class User implements Principal {
 
 		@Override
 		public String getName() {

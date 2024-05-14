@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2023 the original author or authors.
+ * Copyright 2002-2024 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -87,7 +87,7 @@ import org.springframework.util.Assert;
  * transaction. The DataSource that Hibernate uses needs to be JTA-enabled in
  * such a scenario (see container setup).
  *
- * <p>This transaction manager supports nested transactions via JDBC 3.0 Savepoints.
+ * <p>This transaction manager supports nested transactions via JDBC Savepoints.
  * The {@link #setNestedTransactionAllowed} "nestedTransactionAllowed"} flag defaults
  * to "false", though, as nested transactions will just apply to the JDBC Connection,
  * not to the Hibernate Session and its cached entity objects and related context.
@@ -631,8 +631,9 @@ public class HibernateTransactionManager extends AbstractPlatformTransactionMana
 			TransactionSynchronizationManager.unbindResource(sessionFactory);
 		}
 		TransactionSynchronizationManager.bindResource(sessionFactory, resourcesHolder.getSessionHolder());
-		if (getDataSource() != null && resourcesHolder.getConnectionHolder() != null) {
-			TransactionSynchronizationManager.bindResource(getDataSource(), resourcesHolder.getConnectionHolder());
+		ConnectionHolder connectionHolder = resourcesHolder.getConnectionHolder();
+		if (connectionHolder != null && getDataSource() != null) {
+			TransactionSynchronizationManager.bindResource(getDataSource(), connectionHolder);
 		}
 	}
 
@@ -784,8 +785,6 @@ public class HibernateTransactionManager extends AbstractPlatformTransactionMana
 	/**
 	 * Convert the given HibernateException to an appropriate exception
 	 * from the {@code org.springframework.dao} hierarchy.
-	 * <p>Will automatically apply a specified SQLExceptionTranslator to a
-	 * Hibernate JDBCException, else rely on Hibernate's default translation.
 	 * @param ex the HibernateException that occurred
 	 * @return a corresponding DataAccessException
 	 * @see SessionFactoryUtils#convertHibernateAccessException

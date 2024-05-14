@@ -25,6 +25,7 @@ import java.util.stream.Collectors;
 import org.springframework.context.MessageSource;
 import org.springframework.context.MessageSourceResolvable;
 import org.springframework.context.support.StaticMessageSource;
+import org.springframework.lang.Nullable;
 import org.springframework.util.StringUtils;
 import org.springframework.validation.FieldError;
 
@@ -37,7 +38,7 @@ import org.springframework.validation.FieldError;
  */
 public abstract class BindErrorUtils {
 
-	private final static MessageSource defaultMessageSource = new MethodArgumentErrorMessageSource();
+	private static final MessageSource defaultMessageSource = new MethodArgumentErrorMessageSource();
 
 
 	/**
@@ -114,6 +115,7 @@ public abstract class BindErrorUtils {
 		}
 
 		@Override
+		@Nullable
 		protected String getDefaultMessage(MessageSourceResolvable resolvable, Locale locale) {
 			String message = super.getDefaultMessage(resolvable, locale);
 			return (resolvable instanceof FieldError error ? error.getField() + ": " + message : message);
